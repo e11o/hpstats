@@ -1,0 +1,146 @@
+<?php
+
+define("HPSTATS_SHM_KEY", 4778287);
+define("HPSTATS_SEMAPHORE_KEY", 4778287);
+define("HPSTATS_DATA_KEY", 1);
+
+/**
+ * Implementation of hook_menu().
+ */
+function hpstats_menu() {
+  // 1 pixel image counter
+  $items['hpstats/counter/%'] = array(
+    'title' => 'Increment node counter',
+    'page callback' => 'hpstats_counter',
+    'page arguments' => array(2),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_cron().
+ *
+ * Flushes the information stored in shared memory to the database.
+ */
+function hpstats_cron() {
+  global $active_db;
+  
+  if (!$active_db) {
+    watchdog("hpstats", "No active DB available in cron", NULL, WATCHDOG_ERROR);
+    return;
+  }
+  
+  // obtain IPC resources
+  $shm = shm_attach(HPSTATS_SHM_KEY);
+  $sem = sem_get(HPSTATS_SEMAPHORE_KEY);
+  if ($shm === FALSE) {
+    watchdog("hpstats", "Unable to attach shm in cron", NULL, WATCHDOG_ERROR);
+    return;
+  }  
+  if ($sem === FALSE) {
+    watchdog("hpstats", "Unable to get sem in cron", NULL, WATCHDOG_ERROR);
+    return;
+  }
+  // wait for semaphore
+  if (sem_acquire($sem) === FALSE) {
+    watchdog("hpstats", "Unable to acquire sem in cron", NULL, WATCHDOG_ERROR);
+    return;
+  }
+  // get and cleanup data
+  $data = @shm_get_var($shm, HPSTATS_DATA_KEY);
+  if ($data !== FALSE) {
+    shm_remove_var($shm, HPSTATS_DATA_KEY);
+  }
+  // let counter processes work
+  sem_release($sem);
+  
+  if (is_array($data)) {
+    $sql = "";
+    // create multi query from data
+    foreach($data as $nid => $hits) {
+        $sql .= "INSERT INTO 
+            {node_counter} (nid, daycount, totalcount, timestamp) 
+          VALUES ($nid, $hits, $hits, NOW())
+          ON DUPLICATE KEY UPDATE 
+            daycount = daycount + $hits, 
+            totalcount = totalcount + $hits, 
+            timestamp = NOW();";
+    }
+    // apply any prefix
+    $sql = db_prefix_tables($sql);
+    watchdog("hpstats", 
+        "About to execute query in cron: '!sql'", 
+        array('!sql' => $sql), 
+        WATCHDOG_DEBUG);
+    // execute multi query
+    if (!mysqli_multi_query($active_db, $sql)) {
+      watchdog("hpstats", 
+          "Query execution failed: '!error' - Query: '!sql'", 
+          array('!error' => mysqli_error($active_db), '!sql' => $sql), 
+          WATCHDOG_ERROR);
+    } else {
+      while (mysqli_next_result($active_db)); // flush multi_queries
+      watchdog("hpstats", 
+          "Successfully updated counter for !count nodes", 
+          array('!count' => count($data)), 
+          WATCHDOG_NOTICE);
+    }
+  }
+}
+
+/**
+ * Implementation of hook_preprocess_page().
+ */
+function hpstats_preprocess_page(&$vars) {
+  if ($vars['node']) {
+    $url = url("hpstats/counter/".$vars['node']->nid);
+    $vars['closure'] .= "<img src=\"$url\" height=\"1\" width=\"1\" />\n";
+  }
+}
+
+function hpstats_counter($nid) {
+  _hpstats_async_image();
+  
+  $shm = shm_attach(HPSTATS_SHM_KEY);
+  $sem = sem_get(HPSTATS_SEMAPHORE_KEY);
+  if ($shm === FALSE) {
+    watchdog("hpstats", 'Unable to attach shm in counter', NULL, WATCHDOG_ERROR);
+  }  
+  if ($sem === FALSE) {
+    watchdog("hpstats", 'Unable to get sem in counter', NULL, WATCHDOG_ERROR);
+  }
+  if (sem_acquire($sem) === FALSE) {
+    watchdog("hpstats", 'Unable to acquire sem in counter', NULL, WATCHDOG_ERROR);
+    die();
+  }
+  $data = @shm_get_var($shm, HPSTATS_DATA_KEY);
+  if ($data === FALSE) {
+    $data = array();
+  }
+  $data[$nid] = $data[$nid] + 1;
+  shm_put_var($shm, HPSTATS_DATA_KEY, $data);
+  sem_release($sem);
+}
+
+function _hpstats_async_image() {
+  while (ob_get_level()) {
+    ob_end_clean();
+  }
+  header("Connection: close");
+  ignore_user_abort();
+  
+  // Output of 1 pixel transparent gif
+  ob_start();
+  header("Content-type: image/gif");
+  header("Expires: Wed, 11 Nov 1998 11:11:11 GMT");
+  header("Cache-Control: no-cache");
+  header("Cache-Control: must-revalidate");
+  header("Content-Length: 43");
+  header("Connection: close");
+  printf("%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c",71,73,70,56,57,97,1,0,1,0,128,255,0,192,192,192,0,0,0,33,249,4,1,0,0,0,0,44,0,0,0,0,1,0,1,0,0,2,2,68,1,0,59);
+  ob_end_flush();
+  flush();
+}
+

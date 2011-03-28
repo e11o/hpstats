@@ -1,0 +1,6 @@
+name = High Performance Statistics
+description = Efficiently logs access statistics for your site.
+package = Performance
+version = 1.0
+core = 6.x
+
